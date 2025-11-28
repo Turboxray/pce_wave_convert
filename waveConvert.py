@@ -14,9 +14,9 @@ from tkinter import ttk
 
 import simpleaudio as sa
 
-from numba import jit
-
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import MultipleLocator
 
 HEXbase = 16
 DECbase = 10
@@ -29,18 +29,17 @@ filterValues    = ['kaiser_best','kaiser_fast']
 bitdepthValues  = ['8bit']
 playerateValues = ['6960','6991','7020','9279','10440','11090','12180','13500','13920','14040','15360','15740','22020','31480','no resample']
 
-@jit(nopython=True)
+
 def convertFreq(data, newFreq, currFreq, expand_bit=0, vol_adjust=1.0):
 
-    # want this to sound crunch-y so using nearest neighbor
+    # We want this to sound crunch-y so using nearest neighbor for the scaling up to 44.1khz
 
+    # The offset is needed to bring the volume scaled waveform back to center line
+    # because the PCM data is 8bit unsigned. Could probably just convert it to sign
+    # to make life easier, adjust, and then convert back to unsigned.
+    offset = int((255-(255*vol_adjust))/2)
 
-    offset = ((255-(255*vol_adjust))/2)
     print(f"vol adjust: {vol_adjust}")
-    steps = newFreq / currFreq
-    preInc = 0.0
-    currInc = steps
-    output = []
 
     if expand_bit == 2:     # 4bit
         shift = 4
@@ -51,14 +50,21 @@ def convertFreq(data, newFreq, currFreq, expand_bit=0, vol_adjust=1.0):
     else:
         shift = 0   # ???
 
-    for sample in data:
-        delta = int(currInc) - int(preInc)
-        for _ in range(delta):
-            output.append( int( ((sample<<shift)*vol_adjust) + offset) )
-        preInc = currInc
-        currInc += steps
+    output  = data << shift
 
-    return output
+    # Nearest neighbor frequency scale
+    new_len = int( len(output) * (newFreq/currFreq) )
+    old_idx = numpy.linspace(0, len(output)-1, new_len)
+    nearest_idx = numpy.round(old_idx).astype(int)
+
+    sampleData  = output.astype(numpy.float32)
+    sampleData *= vol_adjust
+    sampleData  = numpy.clip(sampleData, numpy.iinfo(numpy.uint8).min, numpy.iinfo(numpy.uint8).max).astype(numpy.uint8)
+
+    output = sampleData[nearest_idx]
+    output += offset
+
+    return output.tolist()
 
 class ConvertWave():
 
@@ -71,6 +77,11 @@ class ConvertWave():
         playbackRate    = sampleObj['playbackRate']
         resampleFilter  = sampleObj['resampleFilter']
         ampBoost        = sampleObj['ampBoost']
+
+        orgSampleData = sampleData.astype(numpy.int32)
+        orgSampleData += 32767
+        orgSampleData = numpy.clip(orgSampleData, 0, 65535)
+        orgSampleData = orgSampleData >> 8
 
         sampleData  = sampleData.astype(numpy.float64)
         sampleData *= ampBoost
@@ -95,7 +106,7 @@ class ConvertWave():
         eightbitSampleData = numpy.clip(eightbitSampleData, 0, 255)
         fivebitSampleData  = numpy.clip(fivebitSampleData, 0, 31)
 
-        return '', fivebitSampleData.tolist(), eightbitSampleData.tolist(), fourbitSampleData.tolist()
+        return '', fivebitSampleData.tolist(), eightbitSampleData.tolist(), fourbitSampleData.tolist(), orgSampleData
 
 
 class WavRead():
@@ -270,17 +281,27 @@ class GuiFrontend():
         self.filename    = ''
         self.orgWavefile = ''
         self.DDAdata     = []
+        self.orgSampleData = None
 
     def plotWave(self, *args):
 
         if self.DDAdata == []:
             return
 
+        if args[1] == 'save':
+            plt.close()
+
         waveType = args[0]
         self.amplified = int(self.components['ampBoost'].get()[0:-1])/100
         adjust_vol = 1
-        if self.components['plotWithVol'].get() == 1:
+        pce_vol = '31'
+        if args[1] == 'save':
+            if self.components['exportWithVol'].get() == 1:
+                adjust_vol = self.getLinearVolume()
+                pce_vol = self.components['pceVol'].get()
+        elif self.components['plotWithVol'].get() == 1:
             adjust_vol = self.getLinearVolume()
+            pce_vol = self.components['pceVol'].get()
 
         self.root.update()
 
@@ -304,13 +325,26 @@ class GuiFrontend():
         rms_deltas = numpy.sqrt(numpy.mean(numpy.square(deltas)))
         print("RMS:", rms)
 
+        if args[1] == 'save':
+            plt.figure(figsize=(15*20, 6))
+
         plt.plot(x, ceiling)
         plt.plot(x, floor)
         plt.plot(x, y)
-        plt.xlabel(f'x (amp={self.amplified}x, RMS={rms:.2f}, RMS_deltas={rms_deltas:.2f} )')
+        plt.margins(x=0)
+        if args[1] == 'save':
+            plt.xlabel(f"x (amp={self.amplified}x, RMS={rms:.2f}, RMS_deltas={rms_deltas:.2f}, PCE Vol={pce_vol}, Rate={self.components['playback'].get()}hz )")
+        else:
+            plt.xlabel(f"x (amp={self.amplified}x, RMS={rms:.2f}, RMS_deltas={rms_deltas:.2f})")
         plt.ylabel(f'Amplitude (max range: 0 - 255)')
         plt.title('Converted Wave')
-        plt.show(block=False)
+
+        if args[1] == 'save':
+            plt.tight_layout()
+            plt.savefig(args[2], dpi=100, bbox_inches='tight', pad_inches=0.05)
+        else:
+            plt.tight_layout(pad=0.2)
+            plt.show(block=False)
 
 
     def openWave(self):
@@ -330,7 +364,8 @@ class GuiFrontend():
         if not result and tk.messagebox.showerror(title="Failed...", message=convertInfo):
             return
 
-        tk.messagebox.showinfo(title="Wav/RIFF Info", message=convertInfo)
+        self.components['filename'] = filename
+
         self.componentState(tk.NORMAL)
         self.filename = self.sfxnameVar.set(pathlib.Path(filename).stem)
         self.orgWavefile = filename
@@ -340,11 +375,17 @@ class GuiFrontend():
         self.pcmHeader['playbackRate']   = int( (playbackRate,self.pcmHeader['SamplesPerSec'])[playbackRate == "no resample"] )
         self.pcmHeader['ampBoost']       = int(self.components['ampBoost'].get()[0:-1])/100
 
-        message, newSampleData, eightBitData, fourBitData = ConvertWave().convertPCMData(self.pcmHeader,self.pcmData)
+        self.components["waveInfo"].set(f"Wave: {self.pcmHeader['SamplesPerSec']}hz @ {self.pcmHeader['BitsPerSample']}bit")
+
+        message, newSampleData, eightBitData, fourBitData, self.orgSampleData = ConvertWave().convertPCMData(self.pcmHeader,self.pcmData)
 
         self.DDAdata = [newSampleData, eightBitData, fourBitData]
 
         return result
+
+    def conversion_change(self, *args):
+        if self.DDAdata != []:
+            self.components["pendingStr"].set('<- Changes')
 
     def convertWavefile(self):
         playbackRate = self.components['playback'].get()
@@ -352,9 +393,11 @@ class GuiFrontend():
         self.pcmHeader['playbackRate']   = int( (playbackRate,self.pcmHeader['SamplesPerSec'])[playbackRate == "no resample"] )
         self.pcmHeader['ampBoost']       = int(self.components['ampBoost'].get()[0:-1])/100
 
-        message, newSampleData, eightBitData, fourBitData = ConvertWave().convertPCMData(self.pcmHeader,self.pcmData)
+        message, newSampleData, eightBitData, fourBitData, _ = ConvertWave().convertPCMData(self.pcmHeader,self.pcmData)
 
         self.DDAdata = [newSampleData, eightBitData, fourBitData]
+
+        self.components["pendingStr"].set('')
 
     def exportFile(self):
 
@@ -363,9 +406,13 @@ class GuiFrontend():
 
         saveDir = fd.asksaveasfilename()
         vol_adjust = 1.0
+        pce_vol = 31
 
         if self.components['exportWithVol'].get() == 1:
+            pce_vol = self.components['pceVol'].get()
             vol_adjust = self.getLinearVolume()
+
+        attribs = f"{self.components['ampBoost'].get()[:-1]}amp_{pce_vol}vol_{self.components['playback'].get()}hz"
 
         for idx,bitdepth in enumerate(['5bit','8bit','4bit']):
             waveData = convertFreq(numpy.asarray(self.DDAdata[idx],dtype=numpy.uint8),44100,self.pcmHeader['playbackRate'],expand_bit=idx,vol_adjust=vol_adjust)
@@ -375,94 +422,110 @@ class GuiFrontend():
             bytes_per_sample = 1
             sample_rate = 44100
 
-            with wave.open(f"{saveDir}_{bitdepth}.wav", "w") as wave_file:
+            with wave.open(f"{saveDir}_{bitdepth}___{attribs}.wav", "w") as wave_file:
                 wave_file.setnchannels(num_channels)
                 wave_file.setsampwidth(bytes_per_sample)
                 wave_file.setframerate(sample_rate)
                 wave_file.writeframes(audio_data.tobytes())
 
+            self.plotWave(bitdepth,'save',f"{saveDir}_{bitdepth}___{attribs}.png")
+
+        with open(f"{saveDir}_settings.txt", "w") as f_out:
+            f_out.write(f"pceVol: {self.components['pceVol'].get()}\n")
+            f_out.write(f"exportWithVol: {self.components['exportWithVol'].get()}\n")
+            f_out.write(f"ampBoost: {self.components['ampBoost'].get()}\n")
+            f_out.write(f"filter: {self.components['filter'].get()}\n")
+            f_out.write(f"playback: {self.components['playback'].get()}\n")
+            f_out.write(f"filename: {self.components['filename']}\n")
+
 
     def saveFile(self):
 
+        if self.components['pendingStr'].get() != '' and not tk.messagebox.askyesno(
+                                                        title="Pending Changes",
+                                                        message="You have pending changes.\n"+
+                                                                "Do you want to continue without pending changes?"):
+            return
+
         saveDir = fd.askdirectory()
-        playbackRate = self.components['playback'].get()
-        self.pcmHeader['resampleFilter'] = self.components['filter'].get()
-        self.pcmHeader['playbackRate']   = int( (playbackRate,self.pcmHeader['SamplesPerSec'])[playbackRate == "no resample"] )
-        self.pcmHeader['ampBoost']       = int(self.components['ampBoost'].get()[0:-1])/100
 
-        message, newSampleData, eightBitData, fourBitData = ConvertWave().convertPCMData(self.pcmHeader,self.pcmData)
+        if saveDir == '':
+            return
 
-        self.DDAdata = [newSampleData, eightBitData, fourBitData]
-
-        # TODO, need to add a switch in the GUI for this
-        newSampleData = [(item,0x01)[item==0x00] for item in eightBitData]
-        newSampleData = newSampleData + [0x00]
-
-        tk.messagebox.showinfo(title=None, message='HuPCM file saved.')
-
-        filename = (self.sfxnameVar.get().strip(),self.filename)[self.sfxnameVar.get().strip() == ""]
-        includePath = self.includePath.get().strip()
-
-        with open(f'{os.path.join(saveDir,filename)}.inc','w') as f:
-
-            # TODO needs to be a GUI option
-            f.write(f'\n')
-            f.write(f'  .db bank(.sample)\n')
-            f.write(f'  .dw .sample\n\n')
-            f.write(f'.sample\n\n')
-            f.write (f'  .page {2}\n\n')
-            f.write(f'  .include \"{os.path.join(includePath,filename)}.data.inc\"\n\n')
-
-        with open(f'{os.path.join(saveDir,filename)}.data.inc','w') as f:
-            columnBytes = 0
-            sampleCount = 0
-            for idx, val in enumerate(newSampleData):
-                valString = hex(val)[2:]
-                valString = '$'+('','0')[len(valString) == 1] + valString
-                if columnBytes == 0:
-                    f.write("  .db ")
-                f.write(f'{valString}')
-                columnBytes += 1
-                if columnBytes > 15:
-                    f.write("\n")
-                    columnBytes = 0
-                    if sampleCount >= 16384:
-                        f.write(f'\n\n  .page {2}\n\n')
-                        sampleCount = 0
-                elif idx == len(newSampleData)-1:
-                    f.write("\n")
-                else:
-                    f.write(", ")
-                sampleCount += 1
-
-        with open(f'{filename}.debug.8bit.bin','wb') as f:
-            f.write(bytearray(newSampleData))
-
-
+        fourBitData =self.DDAdata[2]
         packed_4bit_output = []
         for i in range(0,(len(fourBitData)//2)*2,2):
             packed_4bit_output.append( (fourBitData[i+0] << 4) | fourBitData[i+1] )
         packed_4bit_output.append(0xFF)
 
-        with open(f'{filename}.packed.4bit.bin','wb') as f:
-            f.write(bytearray(packed_4bit_output))
-        with open(f'{filename}.raw.4bit.bin','wb') as f:
-            f.write(bytearray(fourBitData))
+        data_set = [
+                self.DDAdata[0]+[0x80],
+                [(item,0x01)[item==0x00] for item in self.DDAdata[1]]+[0x00],
+                packed_4bit_output ]
+
+        filename = (self.sfxnameVar.get().strip(),self.filename)[self.sfxnameVar.get().strip() == ""]
+        includePath = self.includePath.get().strip()
+
+        for idx, dda_type in enumerate(['5bit','8bit','4bit']):
+
+            newSampleData = data_set[idx]
+            with open(f'{os.path.join(saveDir,filename)}_{dda_type}.inc','w') as f:
+
+                f.write(f'\n')
+                f.write(f'  .db bank(.sample)\n')
+                f.write(f'  .dw .sample\n')
+                f.write(f"  .dw { int(len(newSampleData) / (self.pcmHeader['playbackRate']/60))+1 }\t\t; length in frames\n\n")
+
+                f.write(f'.sample\n\n')
+                f.write (f'  .page {2}\n\n')
+                f.write(f'  .include \"{os.path.join(includePath,filename)}.data.inc\"\n\n')
+
+            with open(f'{os.path.join(saveDir,filename)}_{dda_type}.data.inc','w') as f:
+                columnBytes = 0
+                sampleCount = 0
+                for idx, val in enumerate(newSampleData):
+                    valString = hex(val)[2:]
+                    valString = '$'+('','0')[len(valString) == 1] + valString
+                    if columnBytes == 0:
+                        f.write("  .db ")
+                    f.write(f'{valString}')
+                    columnBytes += 1
+                    if columnBytes > 15:
+                        f.write("\n")
+                        columnBytes = 0
+                        if sampleCount >= 16384:
+                            f.write(f'\n\n  .page {2}\n\n')
+                            sampleCount = 0
+                    elif idx == len(newSampleData)-1:
+                        f.write("\n")
+                    else:
+                        f.write(", ")
+                    sampleCount += 1
+
+            with open(f'{os.path.join(saveDir,filename)}_{dda_type}.bin','wb') as f:
+                f.write(bytearray(newSampleData))
+
+
+        tk.messagebox.showinfo(title=None, message='HuPCM file saved.')
 
 
     def componentState(self, compState):
-            for child in self.components["subframe1"].winfo_children():
-                child.configure(state=compState)
             for child in self.components["subframe2"].winfo_children():
                 child.configure(state=compState)
             self.components["save"].config(state=compState)
-
+            for child in self.components["subframe3"].winfo_children():
+                child.configure(state=compState)
+            self.components["open"].config(state=tk.NORMAL)
 
     def playOriginal(self):
         if not self.orgWavefile and tk.messagebox.showerror(title="No wavefile", message='Please import a wavefile before trying to play.'):
             return
-        self.wave_obj = sa.WaveObject.from_wave_file(self.orgWavefile)
-        self.play_obj = self.wave_obj.play()
+        audio_data = convertFreq(self.orgSampleData, 44100, self.pcmHeader['SamplesPerSec'], expand_bit=1, vol_adjust=1.0 )
+        audio_data = bytearray(audio_data)
+        num_channels = 1
+        bytes_per_sample = 1
+        sample_rate = 44100
+        self.play_obj = sa.play_buffer(audio_data, num_channels, bytes_per_sample, sample_rate)
 
     def stopPlayback(self):
 
@@ -470,10 +533,6 @@ class GuiFrontend():
             return
 
         self.play_obj.stop()
-
-
-    def playConvert(self):
-        pass
 
     def getLinearVolume(self):
 
@@ -557,13 +616,7 @@ class GuiFrontend():
         self.components['filter'] = filterCombo
         filterCombo.grid(column=0, row=1)
         filterCombo.current(0)
-
-        labelTop = ttk.Label(subframe1, text = "Bit Depth")
-        labelTop.grid(column=0, row=2)
-        bitdepthCombo = ttk.Combobox(subframe1, values=bitdepthValues)
-        self.components['bitdepth'] = bitdepthCombo
-        bitdepthCombo.grid(column=0, row=3)
-        bitdepthCombo.current(0)
+        filterCombo.bind("<<ComboboxSelected>>", self.conversion_change)
 
         labelTop = ttk.Label(subframe1, text = "Playback Rate")
         labelTop.grid(column=0, row=4)
@@ -571,6 +624,7 @@ class GuiFrontend():
         self.components['playback'] = playerateCombo
         playerateCombo.grid(column=0, row=5)
         playerateCombo.current(0)
+        playerateCombo.bind("<<ComboboxSelected>>", self.conversion_change)
 
         labelTop = ttk.Label(subframe1, text = "Debug")
         labelTop.grid(column=0, row=6)
@@ -587,6 +641,7 @@ class GuiFrontend():
         ampBoostCombo.set('137%')
         self.components['ampBoost'] = selected_value
         ampBoostCombo.grid(column=0, row=9)
+        ampBoostCombo.bind("<<ComboboxSelected>>", self.conversion_change)
 
 
         subframe2 = tk.LabelFrame(frame1, padx=4, pady=4)
@@ -615,34 +670,45 @@ class GuiFrontend():
 
         openButton   = tk.Button(subframe3, text='     Open WAV       ', command=self.openWave)
         openButton.grid(row=0, column=0,sticky=tk.W)
+        self.components["open"] = openButton
 
-        convWaveButton   = tk.Button(subframe3, text='     Convert HuPCM    ', command=self.convertWavefile)
-        convWaveButton.grid(row=2, column=0,sticky=tk.W)
+        waveInfoStr = tk.StringVar()
+        waveInfoStr.set('Info: No file loaded.')
+        waveInfo = tk.Label(subframe3, textvariable=waveInfoStr,padx=5, pady=5,font=("Arial", 11, "bold"), fg="black")
+        waveInfo.grid(row=1, column=0,sticky=tk.W)
+        self.components["waveInfo"] = waveInfoStr
 
-        saveButton   = tk.Button(subframe3, text='     Save HuPCM    ', command=self.saveFile)
-        saveButton.grid(row=2, column=1,sticky=tk.W)
+        saveButton   = tk.Button(subframe3, text='   Save HuPCM  ', command=self.saveFile,padx=5)
+        saveButton.grid(row=0, column=1,sticky=tk.W)
         self.components["save"] = saveButton
 
         exportWithVol = tk.IntVar()
         exportWithVol.set(1)
         self.components['exportWithVol'] = exportWithVol
         exportWithVolBox = tk.Checkbutton(subframe3,text='Export w/Vol',variable=exportWithVol, onvalue=1)
-        exportWithVolBox.grid(row=2, column=3,sticky=tk.W)
-        exportButton   = tk.Button(subframe3, text='     Export Waves    ', command=self.exportFile)
-        exportButton.grid(row=2, column=2,sticky=tk.W)
+        exportWithVolBox.grid(row=0, column=3,sticky=tk.W)
+        exportButton   = tk.Button(subframe3, text='   Export Waves  ', command=self.exportFile,padx=5)
+        exportButton.grid(row=0, column=2,sticky=tk.W)
         self.components["export"] = exportButton
 
+        convWaveButton   = tk.Button(subframe3, text='Update Conversion', command=self.convertWavefile, padx=3,pady=1)
+        convWaveButton.grid(row=2, column=0,sticky=tk.W)
+        pendingStr = tk.StringVar()
+        pendingStr.set('')
+        label = tk.Label(subframe3, textvariable=pendingStr,padx=5, pady=5,font=("Arial", 11, "bold"), fg="red")
+        label.grid(row=2, column=1,sticky=tk.W)
+        self.components["pendingStr"] = pendingStr
 
         playOrgButton   = tk.Button(subframe3, text='   Play Original   ', command=self.playOriginal)
         playOrgButton.grid(row=3, column=0,sticky=tk.W)
-        playConvertButton   = tk.Button(subframe3, text='   Play Converted   ', command=self.playConvert)
-        playConvertButton.grid(row=4, column=0,sticky=tk.W)
+        # playConvertButton   = tk.Button(subframe3, text='   Play Converted   ', command=self.playConvert)
+        # playConvertButton.grid(row=4, column=0,sticky=tk.W)
 
-        playDDA4bitButton   = tk.Button(subframe3, text='   Play PCE 4bit', command=self.playPCE_4bit)
+        playDDA4bitButton   = tk.Button(subframe3, text='   Play PCE 4bit  ', command=self.playPCE_4bit)
         playDDA4bitButton.grid(row=5, column=0,sticky=tk.W)
-        playDDA5bitButton   = tk.Button(subframe3, text='   Play PCE 5bit', command=self.playPCE_5bit)
+        playDDA5bitButton   = tk.Button(subframe3, text='   Play PCE 5bit  ', command=self.playPCE_5bit)
         playDDA5bitButton.grid(row=5, column=1,sticky=tk.W)
-        playDDA8bitButton   = tk.Button(subframe3, text='   Play PCE 8bit', command=self.playPCE_8bit)
+        playDDA8bitButton   = tk.Button(subframe3, text='   Play PCE 8bit  ', command=self.playPCE_8bit)
         playDDA8bitButton.grid(row=5, column=2,sticky=tk.W)
 
 
@@ -655,11 +721,11 @@ class GuiFrontend():
         withVolBox = tk.Checkbutton(subframe3,text='Show Plot w/Vol',variable=withVol, onvalue=1)
         withVolBox.grid(row=7, column=0,sticky=tk.W)
 
-        plot4bitButton   = tk.Button(subframe3, text='   plot 4bit   ', command=partial(self.plotWave,'4bit'))
+        plot4bitButton   = tk.Button(subframe3, text='   plot 4bit   ', command=partial(self.plotWave,'4bit','',''))
         plot4bitButton.grid(row=8, column=0,sticky=tk.W)
-        plot5bitButton   = tk.Button(subframe3, text='   plot 5bit   ', command=partial(self.plotWave,'5bit'))
+        plot5bitButton   = tk.Button(subframe3, text='   plot 5bit   ', command=partial(self.plotWave,'5bit','',''))
         plot5bitButton.grid(row=8, column=1,sticky=tk.W)
-        plot8bitButton   = tk.Button(subframe3, text='   plot 8bit   ', command=partial(self.plotWave,'8bit'))
+        plot8bitButton   = tk.Button(subframe3, text='   plot 8bit   ', command=partial(self.plotWave,'8bit','',''))
         plot8bitButton.grid(row=8, column=2,sticky=tk.W)
 
         labelTop = ttk.Label(subframe3, text = "PCE Channel Volume")
