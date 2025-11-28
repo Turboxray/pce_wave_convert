@@ -44,9 +44,9 @@ def convertFreq(data, newFreq, currFreq, expand_bit=0, vol_adjust=1.0):
 
     if expand_bit == 2:     # 4bit
         shift = 4
-    elif expand_bit == 0:   #5bit
+    elif expand_bit == 0:   # 5bit
         shift = 3
-    elif expand_bit == 1:   #8bit
+    elif expand_bit == 1:   # 8bit
         shift = 0
     else:
         shift = 0   # ???
@@ -299,13 +299,15 @@ class GuiFrontend():
         y = y*adjust_vol
         y = y + ((255-(255*adjust_vol))/2)
 
+        deltas = numpy.diff(y.astype(numpy.int16))
         rms = numpy.sqrt(numpy.mean(numpy.square(y)))
+        rms_deltas = numpy.sqrt(numpy.mean(numpy.square(deltas)))
         print("RMS:", rms)
 
         plt.plot(x, ceiling)
         plt.plot(x, floor)
         plt.plot(x, y)
-        plt.xlabel(f'x (amp={self.amplified}x)')
+        plt.xlabel(f'x (amp={self.amplified}x, RMS={rms:.2f}, RMS_deltas={rms_deltas:.2f} )')
         plt.ylabel(f'Amplitude (max range: 0 - 255)')
         plt.title('Converted Wave')
         plt.show(block=False)
