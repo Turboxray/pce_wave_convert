@@ -4,11 +4,9 @@ import numpy
 import sys
 import resampy
 import pathlib
-import tkthread; tkthread.patch()   # do this before importing tkinter
+import wave
 
 from functools import partial
-
-import threading
 
 from tkinter import filedialog as fd
 import tkinter as tk
@@ -32,21 +30,27 @@ bitdepthValues  = ['8bit']
 playerateValues = ['6960','6991','7020','9279','10440','11090','12180','13500','13920','14040','15360','15740','22020','31480','no resample']
 
 @jit(nopython=True)
-def convertFreq(data, newFreq, currFreq, expand5bit=False, expand4bit=False, vol_adjust=1.0):
+def convertFreq(data, newFreq, currFreq, expand_bit=0, vol_adjust=1.0):
 
     # want this to sound crunch-y so using nearest neighbor
+
+
     offset = ((255-(255*vol_adjust))/2)
     print(f"vol adjust: {vol_adjust}")
     steps = newFreq / currFreq
     preInc = 0.0
     currInc = steps
     output = []
-    if expand4bit:
+
+    if expand_bit == 2:     # 4bit
         shift = 4
-    elif expand5bit:
+    elif expand_bit == 0:   #5bit
         shift = 3
-    else:
+    elif expand_bit == 1:   #8bit
         shift = 0
+    else:
+        shift = 0   # ???
+
     for sample in data:
         delta = int(currInc) - int(preInc)
         for _ in range(delta):
@@ -265,9 +269,12 @@ class GuiFrontend():
         self.args       = args
         self.filename    = ''
         self.orgWavefile = ''
-        self.DDAdate     = []
+        self.DDAdata     = []
 
     def plotWave(self, *args):
+
+        if self.DDAdata == []:
+            return
 
         waveType = args[0]
         self.amplified = int(self.components['ampBoost'].get()[0:-1])/100
@@ -346,6 +353,32 @@ class GuiFrontend():
         message, newSampleData, eightBitData, fourBitData = ConvertWave().convertPCMData(self.pcmHeader,self.pcmData)
 
         self.DDAdata = [newSampleData, eightBitData, fourBitData]
+
+    def exportFile(self):
+
+        if self.DDAdata == []:
+            return
+
+        saveDir = fd.asksaveasfilename()
+        vol_adjust = 1.0
+
+        if self.components['exportWithVol'].get() == 1:
+            vol_adjust = self.getLinearVolume()
+
+        for idx,bitdepth in enumerate(['5bit','8bit','4bit']):
+            waveData = convertFreq(numpy.asarray(self.DDAdata[idx],dtype=numpy.uint8),44100,self.pcmHeader['playbackRate'],expand_bit=idx,vol_adjust=vol_adjust)
+            audio_data = numpy.asarray(waveData,dtype=numpy.uint8)
+
+            num_channels = 1
+            bytes_per_sample = 1
+            sample_rate = 44100
+
+            with wave.open(f"{saveDir}_{bitdepth}.wav", "w") as wave_file:
+                wave_file.setnchannels(num_channels)
+                wave_file.setsampwidth(bytes_per_sample)
+                wave_file.setframerate(sample_rate)
+                wave_file.writeframes(audio_data.tobytes())
+
 
     def saveFile(self):
 
@@ -430,6 +463,10 @@ class GuiFrontend():
         self.play_obj = self.wave_obj.play()
 
     def stopPlayback(self):
+
+        if self.DDAdata == []:
+            return
+
         self.play_obj.stop()
 
 
@@ -444,12 +481,16 @@ class GuiFrontend():
         return lin_vol
 
     def playPCE_4bit(self):
+
+        if self.DDAdata == []:
+            return
+
         try:
             self.play_obj.stop()
         except:
             pass
         vol_adjust = self.getLinearVolume()
-        waveData = convertFreq(numpy.asarray(self.DDAdata[2],dtype=numpy.uint8),44100,self.pcmHeader['playbackRate'],expand4bit=True,vol_adjust=vol_adjust)
+        waveData = convertFreq(numpy.asarray(self.DDAdata[2],dtype=numpy.uint8),44100,self.pcmHeader['playbackRate'],expand_bit=2,vol_adjust=vol_adjust)
         print(f" org: {len(self.DDAdata[0])}, {len(waveData)} , {len(waveData)/len(self.DDAdata[0])}, {44100/self.pcmHeader['playbackRate']}")
         audio_data = bytearray(waveData)
         num_channels = 1
@@ -458,12 +499,16 @@ class GuiFrontend():
         self.play_obj = sa.play_buffer(audio_data, num_channels, bytes_per_sample, sample_rate)
 
     def playPCE_5bit(self):
+
+        if self.DDAdata == []:
+            return
+
         try:
             self.play_obj.stop()
         except:
             pass
         vol_adjust = self.getLinearVolume()
-        waveData = convertFreq(numpy.asarray(self.DDAdata[0],dtype=numpy.uint8),44100,self.pcmHeader['playbackRate'],expand5bit=True,vol_adjust=vol_adjust)
+        waveData = convertFreq(numpy.asarray(self.DDAdata[0],dtype=numpy.uint8),44100,self.pcmHeader['playbackRate'],expand_bit=0,vol_adjust=vol_adjust)
         print(f" org: {len(self.DDAdata[0])}, {len(waveData)} , {len(waveData)/len(self.DDAdata[0])}, {44100/self.pcmHeader['playbackRate']}")
         audio_data = bytearray(waveData)
         num_channels = 1
@@ -473,12 +518,16 @@ class GuiFrontend():
         self.play_obj = sa.play_buffer(audio_data, num_channels, bytes_per_sample, sample_rate)
 
     def playPCE_8bit(self):
+
+        if self.DDAdata == []:
+            return
+
         try:
             self.play_obj.stop()
         except:
             pass
         vol_adjust = self.getLinearVolume()
-        waveData = convertFreq(numpy.asarray(self.DDAdata[1],dtype=numpy.uint8),44100,self.pcmHeader['playbackRate'],expand5bit=False,vol_adjust=vol_adjust)
+        waveData = convertFreq(numpy.asarray(self.DDAdata[1],dtype=numpy.uint8),44100,self.pcmHeader['playbackRate'],expand_bit=1,vol_adjust=vol_adjust)
         print(f" org: {len(self.DDAdata[0])}, {len(waveData)} , {len(waveData)/len(self.DDAdata[0])}, {44100/self.pcmHeader['playbackRate']}")
         audio_data = bytearray(waveData)
         num_channels = 1
@@ -571,6 +620,17 @@ class GuiFrontend():
         saveButton   = tk.Button(subframe3, text='     Save HuPCM    ', command=self.saveFile)
         saveButton.grid(row=2, column=1,sticky=tk.W)
         self.components["save"] = saveButton
+
+        exportWithVol = tk.IntVar()
+        exportWithVol.set(1)
+        self.components['exportWithVol'] = exportWithVol
+        exportWithVolBox = tk.Checkbutton(subframe3,text='Export w/Vol',variable=exportWithVol, onvalue=1)
+        exportWithVolBox.grid(row=2, column=3,sticky=tk.W)
+        exportButton   = tk.Button(subframe3, text='     Export Waves    ', command=self.exportFile)
+        exportButton.grid(row=2, column=2,sticky=tk.W)
+        self.components["export"] = exportButton
+
+
         playOrgButton   = tk.Button(subframe3, text='   Play Original   ', command=self.playOriginal)
         playOrgButton.grid(row=3, column=0,sticky=tk.W)
         playConvertButton   = tk.Button(subframe3, text='   Play Converted   ', command=self.playConvert)
