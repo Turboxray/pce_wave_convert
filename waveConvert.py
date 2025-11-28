@@ -403,27 +403,14 @@ class GuiFrontend():
         with open(f'{filename}.debug.8bit.bin','wb') as f:
             f.write(bytearray(newSampleData))
 
-        comp_4bit_output = []
-        last_sample = -1
-        for grp in range(0,(len(fourBitData)//8)*8,8):
-            mask = 0
-            count = 0
-            temp = []
-            for i in range(grp,grp+8,1):
 
-                curr_sample = fourBitData[i]
-                if curr_sample == last_sample:
-                    mask |= (1<<count)
-                else:
-                    temp.append(curr_sample)
+        packed_4bit_output = []
+        for i in range(0,(len(fourBitData)//2)*2,2):
+            packed_4bit_output.append( (fourBitData[i+0] << 4) | fourBitData[i+1] )
+        packed_4bit_output.append(0xFF)
 
-                last_sample = curr_sample
-                count += 1
-            comp_4bit_output = comp_4bit_output + [mask] + temp[:]
-
-        print(f' org size: {len(fourBitData)}. New size: {len(comp_4bit_output)}')
-        with open(f'{filename}.4bit.bin','wb') as f:
-            f.write(bytearray(comp_4bit_output))
+        with open(f'{filename}.packed.4bit.bin','wb') as f:
+            f.write(bytearray(packed_4bit_output))
         with open(f'{filename}.raw.4bit.bin','wb') as f:
             f.write(bytearray(fourBitData))
 
@@ -545,7 +532,7 @@ class GuiFrontend():
         labelTop.grid(column=0, row=8)
         selected_value = tk.StringVar()
         ampBoostCombo = ttk.Combobox(subframe1, textvariable=selected_value)
-        ampBoostCombo['values']=['100%','105%','110%','115%','125%','137%','150%','165%','175%','185%','195%','210%','220%','230%','240%','250%','275%','300%','325%','350%','375%','400%','425%','450%']
+        ampBoostCombo['values']=['100%','105%','110%','115%','125%','137%','150%','165%','175%','185%','195%','210%','220%','230%','240%','250%','275%','300%','325%','350%','375%','400%','425%','450%','550%']
         ampBoostCombo.set('137%')
         self.components['ampBoost'] = selected_value
         ampBoostCombo.grid(column=0, row=9)
